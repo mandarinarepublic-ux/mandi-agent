@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "Agente de ventas IA para Mandarina Republic",
   "private": true,
+  "type": "module",
   "scripts": {
     "dev": "vercel dev",
     "deploy": "vercel --prod"
@@ -12,6 +13,6 @@
     "@shopify/shopify-api": "^11.0.0"
   },
   "engines": {
-    "node": ">=18"
+    "node": "20.x"
   }
 }
