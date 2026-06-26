@@ -32,16 +32,11 @@ export default async function handler(req, res) {
     const history = session.messages;
 
     // ── CATÁLOGO: prioridad al shopify_context que manda Make ──
-    // Si Make ya buscó en Shopify y manda el contexto, úsalo directamente.
-    // Solo si no viene, buscamos en el CSV local.
     let catalogContext = '';
-
     if (shopify_context && shopify_context.trim()) {
-      // Make ya consultó Shopify — usar esos datos directamente
       catalogContext = shopify_context.trim();
       console.log(`ShopifyContext de Make: ${catalogContext.slice(0, 80)}...`);
     } else if (message) {
-      // Fallback: buscar en CSV local
       try {
         const result = await searchProducts(message, tiendaId);
         if (result) catalogContext = result.context;
@@ -67,7 +62,7 @@ export default async function handler(req, res) {
     if (name) systemPrompt += `\n\nNombre del cliente: ${name}`;
 
     if (catalogContext) {
-      systemPrompt += `\n\n## 🛒 PRODUCTOS DISPONIBLES (datos reales de Shopify)\n${catalogContext}\n\n⚠️ REGLA ABSOLUTA: Si el producto aparece arriba = LO TENEMOS con esos datos. NUNCA digas que no tienes algo que aparece en esta lista. NUNCA digas "déjame verificar stock" ni "no tenemos".`;
+      systemPrompt += `\n\n## 🛒 PRODUCTOS DISPONIBLES (datos reales de Shopify)\n${catalogContext}\n\n⚠️ REGLA ABSOLUTA: Si el producto aparece arriba = LO TENEMOS. NUNCA digas que no tienes algo que aparece aquí. NUNCA digas "déjame verificar".`;
     }
 
     const response = await anthropic.messages.create({
@@ -81,8 +76,6 @@ export default async function handler(req, res) {
     });
 
     const reply = response.content[0]?.text || '';
-    const inputTokens = response.usage?.input_tokens || 0;
-    const outputTokens = response.usage?.output_tokens || 0;
 
     const newHistory = [
       ...history,
@@ -93,13 +86,15 @@ export default async function handler(req, res) {
 
     return res.status(200).json({
       reply,
+      reply_clean: reply,          // ← alias que usa el módulo 88 de Make
+      content: [{ type: 'text', text: reply }],  // ← formato widget web
       phone,
       tienda: tiendaId,
       source: source || 'unknown',
       catalog_source: shopify_context ? 'shopify_make' : 'csv_local',
       catalog_matches: catalogContext ? catalogContext.split('\n').length : 0,
       context_turns: Math.floor(newHistory.length / 2),
-      tokens: { input: inputTokens, output: outputTokens, total: inputTokens + outputTokens },
+      tokens: { input: response.usage?.input_tokens || 0, output: response.usage?.output_tokens || 0 },
       elapsed_ms: Date.now() - startTime
     });
 
