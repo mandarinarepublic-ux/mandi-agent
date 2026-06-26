@@ -1,7 +1,8 @@
-// api/agent.js — MANDI Agent v2.2 (fix: usa shopify_context + regla stock absoluta)
+// api/agent.js — MANDI Agent v3.0 (catálogo 100% dinámico desde Google Sheets)
 
 import Anthropic from '@anthropic-ai/sdk';
-import { buildSystemPrompt, parseIncomingMedia } from '../lib/systemPrompt.js';
+import { buildSystemPrompt } from '../lib/systemPrompt.js';
+import { searchProducts } from '../lib/sheetsCatalog.js';
 import { getSession, saveSession } from '../lib/sessions.js';
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -16,23 +17,35 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
   if (!isAuthorized(req)) return res.status(401).json({ error: 'Unauthorized' });
 
-  const { phone, message, name, image_url, media_url, source, reset_session, shopify_context } = req.body || {};
+  const { phone, message, name, image_url, media_url, source, reset_session, tienda } = req.body || {};
 
   if (!phone || (!message && !image_url && !media_url)) {
     return res.status(400).json({ error: 'Faltan campos: phone y message (o image_url)' });
   }
 
   const startTime = Date.now();
+  const tiendaId = (tienda || 'MANDARINA').toUpperCase();
 
   try {
-    // Sesión
     const session = reset_session ? { messages: [], meta: {} } : getSession(phone);
     const history = session.messages;
+
+    // Buscar productos relevantes en Google Sheets según el mensaje
+    let catalogContext = '';
+    if (message) {
+      try {
+        const result = await searchProducts(message, tiendaId);
+        if (result) {
+          catalogContext = result.context;
+        }
+      } catch (err) {
+        console.error('SheetsCatalog error (no bloqueante):', err.message);
+      }
+    }
 
     // Construir contenido del usuario
     const imageUrl = image_url || media_url;
     let userContent;
-
     if (imageUrl) {
       userContent = [
         { type: 'image', source: { type: 'url', url: imageUrl } },
@@ -42,31 +55,27 @@ export default async function handler(req, res) {
       userContent = message;
     }
 
-    // Construir system prompt con contexto Shopify si viene
+    // System prompt sin productos hardcodeados + contexto dinámico del catálogo
     let systemPrompt = buildSystemPrompt();
     if (name) systemPrompt += `\n\nNombre del cliente: ${name}`;
-    if (shopify_context && shopify_context.trim().length > 10) {
-      systemPrompt += `\n\n## 🛒 CONTEXTO SHOPIFY EN TIEMPO REAL\nResultado de búsqueda en Shopify para este cliente. Úsalo como fuente de verdad:\n${shopify_context}\n\nSi el producto aparece aquí = TENEMOS STOCK. Confirma precio y talla de inmediato. NUNCA digas "déjame verificar".`;
+    if (catalogContext) {
+      systemPrompt += `\n\n## 🛒 PRODUCTOS ENCONTRADOS EN CATÁLOGO (fuente de verdad)\nEstos son los productos de Mandarina Republic que coinciden con lo que pregunta el cliente. Úsalos directamente — precio, tallas e imagen son los datos reales:\n\n${catalogContext}\n\nSi el producto aparece aquí = LO TENEMOS y estos son los datos exactos. NUNCA digas "déjame verificar".`;
     }
-
-    // Llamar a Claude
-    const messagesForClaude = [
-      ...history,
-      { role: 'user', content: userContent }
-    ];
 
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 500,
       system: systemPrompt,
-      messages: messagesForClaude
+      messages: [
+        ...history,
+        { role: 'user', content: userContent }
+      ]
     });
 
     const reply = response.content[0]?.text || '';
     const inputTokens = response.usage?.input_tokens || 0;
     const outputTokens = response.usage?.output_tokens || 0;
 
-    // Guardar sesión
     const newHistory = [
       ...history,
       { role: 'user', content: typeof userContent === 'string' ? userContent : (message || '[imagen]') },
@@ -77,7 +86,9 @@ export default async function handler(req, res) {
     return res.status(200).json({
       reply,
       phone,
+      tienda: tiendaId,
       source: source || 'unknown',
+      catalog_matches: catalogContext ? catalogContext.split('\n\n').length : 0,
       context_turns: Math.floor(newHistory.length / 2),
       tokens: { input: inputTokens, output: outputTokens, total: inputTokens + outputTokens },
       elapsed_ms: Date.now() - startTime
