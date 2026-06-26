@@ -1,4 +1,5 @@
-// api/agent.js — MANDI Agent v3.0 (catálogo 100% dinámico desde Google Sheets)
+// api/agent.js — MANDI Agent v3.1
+// Prioridad de catálogo: 1) shopify_context de Make  2) CSV local
 
 import Anthropic from '@anthropic-ai/sdk';
 import { buildSystemPrompt } from '../lib/systemPrompt.js';
@@ -17,7 +18,7 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
   if (!isAuthorized(req)) return res.status(401).json({ error: 'Unauthorized' });
 
-  const { phone, message, name, image_url, media_url, source, reset_session, tienda } = req.body || {};
+  const { phone, message, name, image_url, media_url, source, reset_session, tienda, shopify_context } = req.body || {};
 
   if (!phone || (!message && !image_url && !media_url)) {
     return res.status(400).json({ error: 'Faltan campos: phone y message (o image_url)' });
@@ -30,14 +31,20 @@ export default async function handler(req, res) {
     const session = reset_session ? { messages: [], meta: {} } : getSession(phone);
     const history = session.messages;
 
-    // Buscar productos relevantes en Google Sheets según el mensaje
+    // ── CATÁLOGO: prioridad al shopify_context que manda Make ──
+    // Si Make ya buscó en Shopify y manda el contexto, úsalo directamente.
+    // Solo si no viene, buscamos en el CSV local.
     let catalogContext = '';
-    if (message) {
+
+    if (shopify_context && shopify_context.trim()) {
+      // Make ya consultó Shopify — usar esos datos directamente
+      catalogContext = shopify_context.trim();
+      console.log(`ShopifyContext de Make: ${catalogContext.slice(0, 80)}...`);
+    } else if (message) {
+      // Fallback: buscar en CSV local
       try {
         const result = await searchProducts(message, tiendaId);
-        if (result) {
-          catalogContext = result.context;
-        }
+        if (result) catalogContext = result.context;
       } catch (err) {
         console.error('SheetsCatalog error (no bloqueante):', err.message);
       }
@@ -55,11 +62,12 @@ export default async function handler(req, res) {
       userContent = message;
     }
 
-    // System prompt sin productos hardcodeados + contexto dinámico del catálogo
+    // System prompt
     let systemPrompt = buildSystemPrompt();
     if (name) systemPrompt += `\n\nNombre del cliente: ${name}`;
+
     if (catalogContext) {
-      systemPrompt += `\n\n## 🛒 PRODUCTOS ENCONTRADOS EN CATÁLOGO (fuente de verdad)\nEstos son los productos de Mandarina Republic que coinciden con lo que pregunta el cliente. Úsalos directamente — precio, tallas e imagen son los datos reales:\n\n${catalogContext}\n\nSi el producto aparece aquí = LO TENEMOS y estos son los datos exactos. NUNCA digas "déjame verificar".`;
+      systemPrompt += `\n\n## 🛒 PRODUCTOS DISPONIBLES (datos reales de Shopify)\n${catalogContext}\n\n⚠️ REGLA ABSOLUTA: Si el producto aparece arriba = LO TENEMOS con esos datos. NUNCA digas que no tienes algo que aparece en esta lista. NUNCA digas "déjame verificar stock" ni "no tenemos".`;
     }
 
     const response = await anthropic.messages.create({
@@ -88,7 +96,8 @@ export default async function handler(req, res) {
       phone,
       tienda: tiendaId,
       source: source || 'unknown',
-      catalog_matches: catalogContext ? catalogContext.split('\n\n').length : 0,
+      catalog_source: shopify_context ? 'shopify_make' : 'csv_local',
+      catalog_matches: catalogContext ? catalogContext.split('\n').length : 0,
       context_turns: Math.floor(newHistory.length / 2),
       tokens: { input: inputTokens, output: outputTokens, total: inputTokens + outputTokens },
       elapsed_ms: Date.now() - startTime
