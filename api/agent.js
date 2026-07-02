@@ -137,14 +137,14 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
   if (!isAuthorized(req)) return res.status(401).json({ error: 'Unauthorized' });
 
-  const { phone, message, name, image_url, media_url, source, reset_session, tienda } = req.body || {};
+  const { phone, message, name, image_url, media_url, source, reset_session, tienda, store } = req.body || {};
 
   if (!phone || (!message && !image_url && !media_url)) {
     return res.status(400).json({ error: 'Faltan campos: phone y message (o image_url)' });
   }
 
   const startTime = Date.now();
-  const tiendaId = (tienda || 'MANDARINA').toUpperCase();
+  const tiendaId = (tienda || store || 'MANDARINA').toUpperCase();
 
   // Variables de log
   let toolUsada = '';
