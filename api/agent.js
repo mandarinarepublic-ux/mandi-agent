@@ -81,29 +81,25 @@ async function buscarProductosViaMake(keyword) {
 }
 
 // ── EJECUTAR TOOL ───────────────────────────────────────────────────────────
-async function executeTool(toolName, toolInput) {
+async function executeTool(toolName, toolInput, tiendaId = 'MANDARINA') {
   if (toolName === 'buscar_productos') {
     const { keyword } = toolInput;
 
-    // 1) Intentar Shopify DIRECTO primero, si está configurado
-    if (shopifyDirectoConfigurado()) {
+    // 1) Intentar Shopify DIRECTO primero, si está configurado para esta tienda
+    if (shopifyDirectoConfigurado(tiendaId)) {
       try {
-        const { productos, count } = await buscarProductosDirecto(keyword);
+        const { productos, count } = await buscarProductosDirecto(keyword, tiendaId);
         if (productos) {
-          console.log(`MANDI: Shopify directo OK — ${count} productos para "${keyword}"`);
+          console.log(`${tiendaId}: Shopify directo OK — ${count} productos para "${keyword}"`);
           return { productos, keyword, fuente: 'shopify_directo' };
         }
-        // Sin resultados directos — no es un error, simplemente no hay
-        // coincidencias. No tiene sentido reintentar vía Make con el mismo
-        // keyword (el catálogo es el mismo), así que devolvemos vacío.
         return { error: 'Sin productos para: ' + keyword, fuente: 'shopify_directo' };
       } catch (err) {
-        console.error('MANDI: Shopify directo falló, usando Make de respaldo:', err.message);
-        // sigue al fallback de Make abajo
+        console.error(`${tiendaId}: Shopify directo falló, usando Make de respaldo:`, err.message);
       }
     }
 
-    // 2) Respaldo: webhook de Make (comportamiento original)
+    // 2) Respaldo: webhook de Make (comportamiento original — solo Mandarina)
     try {
       const productos = await buscarProductosViaMake(keyword);
       return { productos, keyword, fuente: 'make_webhook' };
@@ -206,7 +202,7 @@ export default async function handler(req, res) {
       console.log(`MANDI tool: ${toolUsada} → "${keywordShopify}"`);
 
       // Ejecutar la tool
-      const toolResult = await executeTool(toolUseBlock.name, toolUseBlock.input);
+      const toolResult = await executeTool(toolUseBlock.name, toolUseBlock.input, tiendaId);
       if (toolResult.productos) {
         productosEncontrados = toolResult.productos.split(' ||| ').length;
       }
