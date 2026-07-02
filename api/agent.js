@@ -133,7 +133,7 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
   if (!isAuthorized(req)) return res.status(401).json({ error: 'Unauthorized' });
 
-  const { phone, message, name, image_url, media_url, source, reset_session, tienda, store } = req.body || {};
+  const { phone, message, name, image_url, media_url, source, reset_session, tienda, store, shopify_context } = req.body || {};
 
   if (!phone || (!message && !image_url && !media_url)) {
     return res.status(400).json({ error: 'Faltan campos: phone y message (o image_url)' });
@@ -168,6 +168,10 @@ export default async function handler(req, res) {
     // System prompt
     let systemPrompt = buildSystemPrompt(tiendaId);
     if (name) systemPrompt += `\n\nNombre del cliente: ${name}`;
+    // Inyectar contexto de Shopify si viene de Make (ya buscado por el escenario)
+    if (shopify_context && shopify_context.trim()) {
+      systemPrompt += `\n\n## 🛒 PRODUCTOS DISPONIBLES EN TIENDA (datos reales de Shopify):\n${shopify_context}\n\n⚠️ IMPORTANTE: Estos productos YA FUERON encontrados en Shopify. ÚSALOS DIRECTAMENTE sin llamar la tool buscar_productos. Si el cliente pregunta por uno de estos, confirma precio, tallas y cierra la venta YA.`;
+    }
 
     // Mensajes para Claude
     const apiMessages = [
