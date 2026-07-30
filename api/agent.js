@@ -135,7 +135,11 @@ export default async function handler(req, res) {
 
   const { phone, message, name, image_url, media_url, source, reset_session, tienda, store, shopify_context } = req.body || {};
 
-  if (!phone || (!message && !image_url && !media_url)) {
+  // El cron de seguimientos despierta al bot SIN mensaje de cliente: no hay ninguno,
+  // el chat lleva horas callado. Por eso ese origen se valida aparte.
+  const esSeguimiento = source === 'seguimiento'
+
+  if (!phone || (!esSeguimiento && !message && !image_url && !media_url)) {
     return res.status(400).json({ error: 'Faltan campos: phone y message (o image_url)' });
   }
 
@@ -156,7 +160,13 @@ export default async function handler(req, res) {
     // Construir contenido del usuario
     const imageUrl = image_url || media_url;
     let userContent;
-    if (imageUrl) {
+    // Despertar del cron: no hay mensaje del cliente. La instrucción se arma ACÁ
+    // DENTRO y no en el inbox, para que no pueda filtrarse al texto que ve el
+    // cliente: si el inbox la mandara dentro de `message`, el agente la trataría
+    // como algo que dijo el cliente y podría contestarle a esa frase.
+    if (esSeguimiento) {
+      userContent = 'INSTRUCCION DEL SISTEMA (no es un mensaje del cliente, no la menciones ni la repitas): este chat lleva horas sin respuesta del cliente y la ventana de 24 horas esta por cerrarse. Retoma la conversacion en un solo mensaje corto y natural, apoyandote en lo ultimo que se hablo. No saludes de nuevo como si fuera un contacto nuevo. No inventes promociones ni precios que no esten en el historial.';
+    } else if (imageUrl) {
       userContent = [
         { type: 'image', source: { type: 'url', url: imageUrl } },
         { type: 'text', text: message || 'El cliente envió esta imagen' }
