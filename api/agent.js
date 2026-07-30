@@ -265,7 +265,13 @@ export default async function handler(req, res) {
     // Guardar historial limpio — sin tool_use/tool_result blocks
     // En su lugar guardamos el catálogo consultado como contexto de texto plano
     // Así MANDI recuerda qué productos mostró sin romper el formato de la API
-    const userMsg = { role: 'user', content: typeof userContent === 'string' ? userContent : (message || '[imagen]') };
+    // En el despertar del cron NO guardamos la instruccion de reanudacion en el historial:
+    // no la dijo el cliente, y si quedara guardada asi el bot la veria como un mensaje real
+    // en el siguiente turno y podria responderle a ella o mencionarla. Guardamos en su lugar
+    // un marcador corto y neutro que deja constancia de que ese turno fue un seguimiento
+    // automatico, sin inventar que el cliente escribio algo. Mantenemos el turno (en vez de
+    // omitirlo) para no dejar dos turnos de assistant seguidos, que rompe el formato de la API.
+    const userMsg = { role: 'user', content: esSeguimiento ? '[seguimiento automatico]' : (typeof userContent === 'string' ? userContent : (message || '[imagen]')) };
     const assistantFinalMsg = { role: 'assistant', content: reply };
 
     const newHistory = [...history, userMsg];
