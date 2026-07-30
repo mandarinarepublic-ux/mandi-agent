@@ -305,7 +305,7 @@ export default async function handler(req, res) {
     // Log a Google Sheets (fire and forget)
     logDecision({
       phone,
-      mensaje: message || '[imagen]',
+      mensaje: esSeguimiento ? '[seguimiento automatico]' : (message || '[imagen]'),
       clasificacion,
       tool_usada: toolUsada,
       keyword_shopify: keywordShopify,
@@ -339,7 +339,7 @@ export default async function handler(req, res) {
 
     logDecision({
       phone,
-      mensaje: message || '',
+      mensaje: esSeguimiento ? '[seguimiento automatico]' : (message || ''),
       clasificacion: 'ERROR',
       error: error.message,
       elapsed_ms: elapsed
