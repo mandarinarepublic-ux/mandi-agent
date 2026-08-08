@@ -6,7 +6,7 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { buildSystemPrompt } from '../lib/systemPrompt.js';
-import { getSession, saveSession } from '../lib/sessions.js';
+import { getConversacion, fusionarTurnos } from '../lib/conversacion.js';
 import { logDecision, initSheet } from '../lib/logger.js';
 import { isConfigured as shopifyDirectoConfigurado, buscarProductosDirecto } from '../lib/shopifyClient.js';
 
@@ -189,8 +189,12 @@ export default async function handler(req, res) {
   let fuenteProductos = '';
 
   try {
-    const session = reset_session ? { messages: [], meta: {} } : getSession(phone);
-    const history = session.messages;
+    // Memoria del hilo LEÍDA DEL INBOX (inbox.mensajes en Supabase) — fuente de
+    // verdad, e incluye lo que respondió un vendedor humano. Antes esto salía de un
+    // `Map` en RAM que en serverless llegaba vacío casi siempre: MANDI no recordaba
+    // nada y se re-saludaba a mitad de conversación.
+    // Si Supabase falla devuelve [] y MANDI responde igual, sin memoria ese turno.
+    const history = reset_session ? [] : await getConversacion(phone, 10);
 
     // Construir contenido del usuario
     const imageUrl = image_url || media_url;
@@ -218,11 +222,27 @@ export default async function handler(req, res) {
       systemPrompt += `\n\n## 🛒 PRODUCTOS DISPONIBLES EN TIENDA (datos reales de Shopify):\n${shopify_context}\n\n⚠️ IMPORTANTE: Estos productos YA FUERON encontrados en Shopify. ÚSALOS DIRECTAMENTE sin llamar la tool buscar_productos. Si el cliente pregunta por uno de estos, confirma precio, tallas y cierra la venta YA.`;
     }
 
-    // Mensajes para Claude
-    const apiMessages = [
-      ...history,
-      { role: 'user', content: userContent }
-    ];
+    // Mensajes para Claude.
+    //
+    // El ENTRANTE actual normalmente YA está en `history`: el webhook del inbox lo
+    // guarda en Supabase ANTES de llamarnos. Solo lo agregamos si todavía no aparece,
+    // para no mandarlo dos veces.
+    //
+    // El despertar del cron es el caso contrario: NO hay mensaje del cliente que
+    // guardar, así que la instrucción de reanudación siempre se agrega. Se excluye
+    // del descarte a propósito, para que no dependa de que `message` venga vacío.
+    const incomingText = (message || '').trim();
+    const ultimo = history[history.length - 1];
+    const yaEnHistorial = !esSeguimiento && !!ultimo && ultimo.role === 'user'
+      && typeof ultimo.content === 'string' && incomingText.length > 0
+      && ultimo.content.split('\n').some((l) => l.trim() === incomingText);
+
+    // `fusionarTurnos` deja la alternancia user/assistant limpia. Importa sobre todo
+    // en el camino del cron: ahí el historial puede terminar en 'user' (el cliente
+    // escribió y nadie contestó — 22% de los chats) y encima le agregamos otro 'user'.
+    const apiMessages = yaEnHistorial
+      ? [...history]
+      : fusionarTurnos([...history, { role: 'user', content: userContent }]);
 
     // ── PRIMERA LLAMADA A CLAUDE ────────────────────────────────────────────
     let response = await anthropic.messages.create({
@@ -297,43 +317,16 @@ export default async function handler(req, res) {
 
     if (!toolUsada) clasificacion = 'OTRO';
 
-    // Guardar historial limpio — sin tool_use/tool_result blocks
-    // En su lugar guardamos el catálogo consultado como contexto de texto plano
-    // Así MANDI recuerda qué productos mostró sin romper el formato de la API
-    // En el despertar del cron NO guardamos la instruccion de reanudacion en el historial:
-    // no la dijo el cliente, y si quedara guardada asi el bot la veria como un mensaje real
-    // en el siguiente turno y podria responderle a ella o mencionarla. Guardamos en su lugar
-    // un marcador corto y neutro que deja constancia de que ese turno fue un seguimiento
-    // automatico, sin inventar que el cliente escribio algo. Mantenemos el turno (en vez de
-    // omitirlo) para no dejar dos turnos de assistant seguidos, que rompe el formato de la API.
-    const userMsg = { role: 'user', content: esSeguimiento ? '[seguimiento automatico]' : (typeof userContent === 'string' ? userContent : (message || '[imagen]')) };
-    const assistantFinalMsg = { role: 'assistant', content: reply };
-
-    const newHistory = [...history, userMsg];
-
-    // Si hubo una tool call, inyectar el catálogo como contexto de sistema
-    // en forma de mensaje user/assistant para que MANDI lo tenga en cuenta
-    if (intermediateMessages.length > 0) {
-      // Extraer el tool_result con los productos
-      const toolResultMsg = intermediateMessages.find(m =>
-        m.role === 'user' && Array.isArray(m.content) && m.content[0]?.type === 'tool_result'
-      );
-      if (toolResultMsg) {
-        const toolContent = toolResultMsg.content[0]?.content || '';
-        // Guardarlo como contexto limpio: user pregunta, assistant confirma catálogo
-        newHistory.push({
-          role: 'assistant',
-          content: `[CATÁLOGO CONSULTADO EN SHOPIFY para esta conversación: ${toolContent}]`
-        });
-        newHistory.push({
-          role: 'user',
-          content: 'ok, basándote en ese catálogo responde mi pregunta anterior'
-        });
-      }
-    }
-
-    newHistory.push(assistantFinalMsg);
-    saveSession(phone, newHistory, { name, source, lastReply: reply.slice(0, 100) });
+    // Acá NO se persiste nada. El inbox es la fuente de verdad: el entrante ya lo
+    // guardó el webhook y esta respuesta la guarda /api/saliente cuando el inbox la
+    // envía. Así el próximo turno lee la conversación REAL — incluido lo que haya
+    // contestado un vendedor humano entremedio.
+    //
+    // Con esto se cae solo el problema que el historial en RAM resolvía a mano: ya no
+    // hay que decidir qué guardar del despertar del cron (la instrucción de
+    // reanudación no se guarda en ningún lado porque no se guarda nada), ni inyectar
+    // el catálogo consultado como texto. Lo que MANDI mostró vuelve igual en el
+    // próximo turno dentro de su propia respuesta, que sí queda en el inbox.
 
     const elapsed = Date.now() - startTime;
 
@@ -363,7 +356,7 @@ export default async function handler(req, res) {
       keyword: keywordShopify,
       productos_encontrados: productosEncontrados,
       fuente_productos: fuenteProductos,
-      context_turns: Math.floor(newHistory.length / 2),
+      context_turns: Math.floor(apiMessages.length / 2),
       tokens: { input: totalInputTokens, output: totalOutputTokens },
       elapsed_ms: elapsed
     });
