@@ -1,5 +1,11 @@
-// api/chat.js — Endpoint público para widget web
-// Consulta Shopify Admin API directamente para obtener productos reales
+// api/chat.js — Chat del widget web. CERRADO con clave desde el 17-nov-2026.
+//
+// ☠️ Antes era público: sin clave, con CORS `*` y en un repo público. Cualquiera
+// podía mandarle mensajes y gastar el saldo de Anthropic. Además el prompt traía
+// las cuentas bancarias y la cédula del dueño a la vista en GitHub.
+// Ahora exige la misma clave que /api/agent (x-mandi-key) y falla CERRADO.
+// Un widget en el navegador no puede guardar una clave: si se quiere volver a
+// tener chat en la web, tiene que pasar por un backend propio que la ponga.
 
 import Anthropic from '@anthropic-ai/sdk';
 
@@ -47,13 +53,23 @@ function extraerKeywords(messages) {
   return typeof lastUser?.content === 'string' ? lastUser.content : '';
 }
 
+const limpia = (v) => String(v || '').replace(/[^\x21-\x7E]/g, '');
+function igual(a, b) {
+  if (!a || !b || a.length !== b.length) return false;
+  let dif = 0;
+  for (let i = 0; i < a.length; i++) dif |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return dif === 0;
+}
+// Solo la clave NUEVA: la vieja quedó publicada y acá no hay transición que cuidar.
+function autorizado(req) {
+  const key = limpia(req.headers['x-mandi-key'] || req.headers['authorization']?.replace('Bearer ', ''));
+  const esperada = limpia(process.env.MANDI_API_KEY);
+  return Boolean(key && esperada && igual(key, esperada));
+}
+
 export default async function handler(req, res) {
-  // CORS
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  
-  if (req.method === 'OPTIONS') return res.status(200).end();
+  if (req.method === 'OPTIONS') return res.status(204).end();
+  if (!autorizado(req)) return res.status(401).json({ error: 'Unauthorized' });
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   const { messages, system } = req.body || {};
@@ -71,7 +87,7 @@ export default async function handler(req, res) {
     let systemPrompt = 'Eres Mandi, asistente de ventas de Mandarina Republic Ecuador. Anime streetwear, envío gratis en Quito. Responde siempre en español, de forma amigable y directa.\n';
     systemPrompt += 'REGLA CRÍTICA: Si el catálogo tiene productos = los TIENES. Nunca digas que no tienes algo si aparece aquí. NUNCA digas "déjame verificar stock".\n';
     systemPrompt += 'FLUJO: 1) Muestra productos disponibles con precio 2) Pregunta talla 3) Pide teléfono WhatsApp 4) Confirma pedido\n';
-    systemPrompt += 'PAGO: Banco Pichincha 2210996988 / Guayaquil 38180287 / Produbanco 18059046370. A nombre de Rodrigo Castillo CI 1716608094\n';
+    // Los datos de pago NO van acá (repo público): salen de las respuestas rápidas del inbox.
     
     if (catalogContext) {
       systemPrompt += `\n## PRODUCTOS DISPONIBLES EN SHOPIFY (datos reales y actualizados):\n${catalogContext}\n`;
