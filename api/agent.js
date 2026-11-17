@@ -9,6 +9,7 @@ import { buildSystemPrompt, bloqueRespuestasRapidas } from '../lib/systemPrompt.
 import { getRespuestasRapidas, catalogoParaPrompt, porCodigo, extrasDe } from '../lib/respuestasRapidas.js';
 import { getConversacion, fusionarTurnos, getFichaChat } from '../lib/conversacion.js';
 import { PROMPT_ETAPAS, contextoDeFicha, separarEtapa } from '../lib/etapas.js';
+import { ajustarRespuestaFinal } from '../lib/respuestaFinal.js';
 import { logDecision, initSheet } from '../lib/logger.js';
 import { isConfigured as shopifyDirectoConfigurado, buscarProductosDirecto } from '../lib/shopifyClient.js';
 
@@ -299,9 +300,12 @@ export default async function handler(req, res) {
     // La línea "ETAPA: x" es para el registro: se quita SIEMPRE antes de salir.
     const sep = separarEtapa(replyBlock?.text || '');
     const etapa = sep.etapa;
-    let reply = sep.texto;
-    // "OK" = el agente no tiene nada que agregar a la respuesta rápida que mandó.
-    if (ctx.enviadas.length && /^ok[.!]?$/i.test(reply)) reply = '';
+    // "OK" sin nada enviado → a una persona; derivar sin texto → aviso al cliente.
+    // Ver lib/respuestaFinal.js (casos medidos en el modo sombra, 17-nov-2026).
+    const ajuste = ajustarRespuestaFinal({ reply: sep.texto, enviadas: ctx.enviadas, derivar: ctx.derivar });
+    let reply = ajuste.reply;
+    ctx.derivar = ajuste.derivar;
+    if (ctx.derivar && !clasificacion) clasificacion = 'DERIVAR';
 
     if (!toolUsada) clasificacion = 'OTRO';
 
