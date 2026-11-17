@@ -7,7 +7,8 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { buildSystemPrompt, bloqueRespuestasRapidas } from '../lib/systemPrompt.js';
 import { getRespuestasRapidas, catalogoParaPrompt, porCodigo, extrasDe } from '../lib/respuestasRapidas.js';
-import { getConversacion, fusionarTurnos } from '../lib/conversacion.js';
+import { getConversacion, fusionarTurnos, getFichaChat } from '../lib/conversacion.js';
+import { PROMPT_ETAPAS, contextoDeFicha, separarEtapa } from '../lib/etapas.js';
 import { logDecision, initSheet } from '../lib/logger.js';
 import { isConfigured as shopifyDirectoConfigurado, buscarProductosDirecto } from '../lib/shopifyClient.js';
 
@@ -186,7 +187,10 @@ export default async function handler(req, res) {
     // nada y se re-saludaba a mitad de conversación.
     // Si Supabase falla devuelve [] y MANDI responde igual, sin memoria ese turno.
     const cuenta = CUENTA_DE[tiendaId] || 'MANDI';
-    const history = reset_session ? [] : await getConversacion(phone, 1000, cuenta);
+    const [history, ficha] = await Promise.all([
+      reset_session ? [] : getConversacion(phone, 1000, cuenta),
+      getFichaChat(phone, cuenta),
+    ]);
 
     // Construir contenido del usuario
     const imageUrl = image_url || media_url;
@@ -210,9 +214,12 @@ export default async function handler(req, res) {
     // caché de prompt; lo que cambia por cliente va después y no la invalida.
     const rapidas = tiendaId === 'MANDARINA' ? await getRespuestasRapidas(cuenta) : [];
     const ctx = { rapidas, enviadas: [], derivar: '' };
-    const estable = buildSystemPrompt(tiendaId) + bloqueRespuestasRapidas(catalogoParaPrompt(rapidas));
+    const conEtapas = tiendaId === 'MANDARINA';
+    const estable = buildSystemPrompt(tiendaId) + (conEtapas ? PROMPT_ETAPAS : '') + bloqueRespuestasRapidas(catalogoParaPrompt(rapidas));
     let variable = '';
     if (name) variable += `Nombre del cliente: ${name}`;
+    const deFicha = conEtapas ? contextoDeFicha(ficha) : '';
+    if (deFicha) variable += `\n\n## LO QUE EL INBOX SABE DE ESTE CHAT\n${deFicha}`;
     if (shopify_context && shopify_context.trim()) {
       variable += `\n\n## PRODUCTOS YA ENCONTRADOS EN SHOPIFY (datos reales):\n${shopify_context}\nÚsalos directamente, sin llamar buscar_productos.`;
     }
@@ -289,7 +296,10 @@ export default async function handler(req, res) {
 
     // ── RESPUESTA FINAL ──────────────────────────────────────────────────────
     const replyBlock = response.content.find(b => b.type === 'text');
-    let reply = (replyBlock?.text || '').trim();
+    // La línea "ETAPA: x" es para el registro: se quita SIEMPRE antes de salir.
+    const sep = separarEtapa(replyBlock?.text || '');
+    const etapa = sep.etapa;
+    let reply = sep.texto;
     // "OK" = el agente no tiene nada que agregar a la respuesta rápida que mandó.
     if (ctx.enviadas.length && /^ok[.!]?$/i.test(reply)) reply = '';
 
@@ -335,6 +345,7 @@ export default async function handler(req, res) {
       // ANTES del texto. Y si hay que marcar el chat para una persona.
       respuestas_rapidas: ctx.enviadas,
       derivar: ctx.derivar,
+      etapa,
       modelo: MODELO,
       keyword: keywordShopify,
       productos_encontrados: productosEncontrados,
