@@ -33,7 +33,7 @@ export default async function handler(req, res) {
   if (req.method === 'POST') {
     const { phone } = req.body || {};
     if (!phone) return res.status(400).json({ error: 'Falta phone' });
-    const history = await getConversacion(phone, 10);
+    const history = await getConversacion(phone, 300);
     return res.status(200).json({
       phone,
       fuente: 'supabase:inbox.mensajes(cuenta=MANDI)',

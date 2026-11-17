@@ -5,24 +5,22 @@
 // Log de decisiones → Google Sheets MANDI_LOGS
 
 import Anthropic from '@anthropic-ai/sdk';
-import { buildSystemPrompt } from '../lib/systemPrompt.js';
+import { buildSystemPrompt, bloqueRespuestasRapidas } from '../lib/systemPrompt.js';
+import { getRespuestasRapidas, catalogoParaPrompt, porCodigo, extrasDe } from '../lib/respuestasRapidas.js';
 import { getConversacion, fusionarTurnos } from '../lib/conversacion.js';
 import { logDecision, initSheet } from '../lib/logger.js';
 import { isConfigured as shopifyDirectoConfigurado, buscarProductosDirecto } from '../lib/shopifyClient.js';
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-const MAKE_SHOPIFY_WEBHOOK = 'https://hook.us2.make.com/irqcoe515xt1ijtn9w1nrp83xdmhn493';
+// Haiku 5.5 (auditoría 17-nov-2026): antes Sonnet 4.6, unas 20 veces más caro.
+// Se puede cambiar sin tocar código con la variable MANDI_MODEL.
+const MODELO = (process.env.MANDI_MODEL || 'claude-haiku-5-5').trim();
+const MAX_VUELTAS = 4; // tope del ciclo de tools por mensaje
+// Cuenta del inbox de cada tienda (historial y respuestas rápidas).
+const CUENTA_DE = { MANDARINA: 'MANDI', INDSTORE: 'IND' };
 
 // Inicializar headers de la hoja al arrancar
 initSheet().catch(() => {});
-
-// ── GUÍAS DE TALLAS ───────────────────────────────────────────────────────
-const GUIAS_TALLAS = {
-  hoodie:    'https://cdn.shopify.com/s/files/1/0689/5832/2781/files/MEDIDAS_CAMISETAS_NINOS_ADMINISTRADOR-02.png?v=1746666338',
-  chaqueta:  'https://cdn.shopify.com/s/files/1/0689/5832/2781/files/MEDIDAS_CAMISETAS_NINOS_ADMINISTRADOR-02.png?v=1746666338',
-  camiseta:  'https://cdn.shopify.com/s/files/1/0689/5832/2781/files/MEDIDAS_MANDARINA-01.png?v=1746666339',
-  general:   'https://cdn.shopify.com/s/files/1/0689/5832/2781/files/MEDIDAS_CAMISETAS_NINOS_ADMINISTRADOR-02.png?v=1746666338'
-};
 
 // ── TOOLS QUE MANDI PUEDE USAR ─────────────────────────────────────────────
 const MANDI_TOOLS = [
@@ -45,73 +43,66 @@ CUÁNDO NO USAR: saludos, preguntas sobre envíos/pagos, cuando ya tienes el pro
     }
   },
   {
-    name: 'obtener_guia_tallas',
-    description: `Devuelve la imagen correcta de guía de tallas según el tipo de prenda.
-Usar cuando el cliente pregunta por medidas, tallas, cuál talla elegir, o cómo saber su talla.
-Siempre úsala en contexto: si estaban hablando de hoodies, usa hoodie. Si de camisetas, usa camiseta.`,
+    name: 'enviar_respuesta_rapida',
+    description: `Envía al cliente una RESPUESTA RÁPIDA del equipo, completa: su texto oficial y todo lo que incluye (fotos, guía de tallas, botones, carrusel de productos o formulario de datos).
+Es SIEMPRE la primera opción cuando una de la lista contesta lo que el cliente pide o es el siguiente paso de la venta.
+Pasa el código tal como aparece en la lista (por ejemplo "R7").`,
     input_schema: {
       type: 'object',
       properties: {
-        tipo: {
-          type: 'string',
-          enum: ['hoodie', 'chaqueta', 'camiseta', 'general'],
-          description: 'Tipo de prenda: hoodie/chaqueta para sudaderas y chaquetas, camiseta para remeras, general si no está claro'
-        }
+        codigo: { type: 'string', description: 'Código de la respuesta rápida, por ejemplo "R7"' }
       },
-      required: ['tipo']
+      required: ['codigo']
+    }
+  },
+  {
+    name: 'derivar_a_persona',
+    description: `Marca el chat para que lo atienda una persona del equipo. Úsala para: estado de un pedido ya hecho, reclamos, cambios o devoluciones, talla agotada, producto que no encuentras, personalizados o al por mayor, comprobantes de pago, o cualquier duda que no puedas resolver con certeza.`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        motivo: { type: 'string', description: 'Motivo en pocas palabras, para el vendedor. Ej: "pregunta por su pedido", "talla 3XL agotada"' }
+      },
+      required: ['motivo']
     }
   }
 ];
 
-// ── BUSCAR PRODUCTOS VÍA MAKE (respaldo) ───────────────────────────────────
-async function buscarProductosViaMake(keyword) {
-  const res = await fetch(MAKE_SHOPIFY_WEBHOOK, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ keyword, phone: 'mandi_tool' }),
-    signal: AbortSignal.timeout(8000)
-  });
-
-  if (!res.ok) throw new Error(`Make webhook respondió ${res.status}`);
-
-  const data = await res.json();
-  if (!data?.productos) throw new Error('Make webhook sin productos');
-
-  return data.productos;
-}
-
 // ── EJECUTAR TOOL ───────────────────────────────────────────────────────────
-async function executeTool(toolName, toolInput, tiendaId = 'MANDARINA') {
+async function executeTool(toolName, toolInput, tiendaId, ctx) {
   if (toolName === 'buscar_productos') {
     const { keyword } = toolInput;
-
-    // 1) Intentar Shopify DIRECTO primero, si está configurado para esta tienda
-    if (shopifyDirectoConfigurado(tiendaId)) {
-      try {
-        const { productos, count } = await buscarProductosDirecto(keyword, tiendaId);
-        if (productos) {
-          console.log(`${tiendaId}: Shopify directo OK — ${count} productos para "${keyword}"`);
-          return { productos, keyword, fuente: 'shopify_directo' };
-        }
-        return { error: 'Sin productos para: ' + keyword, fuente: 'shopify_directo' };
-      } catch (err) {
-        console.error(`${tiendaId}: Shopify directo falló, usando Make de respaldo:`, err.message);
-      }
+    // Solo Shopify directo. El respaldo por Make se quitó: Make ya no existe en el
+    // stack y ese webhook fallaba en silencio.
+    if (!shopifyDirectoConfigurado(tiendaId)) {
+      return { error: 'Catálogo no disponible ahora. Deriva a una persona.', fuente: 'sin_configurar' };
     }
-
-    // 2) Respaldo: webhook de Make (comportamiento original — solo Mandarina)
     try {
-      const productos = await buscarProductosViaMake(keyword);
-      return { productos, keyword, fuente: 'make_webhook' };
+      const { productos, count } = await buscarProductosDirecto(keyword, tiendaId);
+      if (productos) {
+        console.log(`${tiendaId}: Shopify directo OK — ${count} productos para "${keyword}"`);
+        return { productos, keyword, fuente: 'shopify_directo' };
+      }
+      return { error: 'Sin productos para: ' + keyword + '. Deriva a una persona.', fuente: 'shopify_directo' };
     } catch (err) {
-      return { error: 'Error consultando Shopify: ' + err.message };
+      console.error(`${tiendaId}: Shopify directo falló:`, err.message);
+      return { error: 'Catálogo no disponible ahora. Deriva a una persona.', fuente: 'shopify_error' };
     }
   }
 
-  if (toolName === 'obtener_guia_tallas') {
-    const { tipo } = toolInput;
-    const url = GUIAS_TALLAS[tipo] || GUIAS_TALLAS.general;
-    return { imagen_guia: url, tipo };
+  if (toolName === 'enviar_respuesta_rapida') {
+    const r = porCodigo(ctx.rapidas, toolInput?.codigo);
+    if (!r) return { error: `No existe la respuesta rápida "${toolInput?.codigo}". Usa un código de la lista.` };
+    if (ctx.enviadas.includes(r.id)) return { ok: true, nota: 'Ya estaba en la cola de este turno.' };
+    if (ctx.enviadas.length >= 2) return { error: 'Máximo 2 respuestas rápidas por turno.' };
+    ctx.enviadas.push(r.id);
+    const extras = extrasDe(r);
+    return { ok: true, nota: `Enviada al cliente${extras ? ' con ' + extras : ''}. No repitas su contenido.` };
+  }
+
+  if (toolName === 'derivar_a_persona') {
+    ctx.derivar = String(toolInput?.motivo || 'necesita una persona').slice(0, 120);
+    return { ok: true, nota: 'Chat marcado para una persona. Avísale al cliente en una línea que le confirman enseguida.' };
   }
 
   return { error: 'Tool desconocida: ' + toolName };
@@ -194,7 +185,8 @@ export default async function handler(req, res) {
     // `Map` en RAM que en serverless llegaba vacío casi siempre: MANDI no recordaba
     // nada y se re-saludaba a mitad de conversación.
     // Si Supabase falla devuelve [] y MANDI responde igual, sin memoria ese turno.
-    const history = reset_session ? [] : await getConversacion(phone, 10);
+    const cuenta = CUENTA_DE[tiendaId] || 'MANDI';
+    const history = reset_session ? [] : await getConversacion(phone, 300, cuenta);
 
     // Construir contenido del usuario
     const imageUrl = image_url || media_url;
@@ -214,13 +206,22 @@ export default async function handler(req, res) {
       userContent = message;
     }
 
-    // System prompt
-    let systemPrompt = buildSystemPrompt(tiendaId);
-    if (name) systemPrompt += `\n\nNombre del cliente: ${name}`;
-    // Inyectar contexto de Shopify si viene de Make (ya buscado por el escenario)
+    // System prompt en DOS bloques: el estable (reglas + respuestas rápidas) va con
+    // caché de prompt; lo que cambia por cliente va después y no la invalida.
+    const rapidas = tiendaId === 'MANDARINA' ? await getRespuestasRapidas(cuenta) : [];
+    const ctx = { rapidas, enviadas: [], derivar: '' };
+    const estable = buildSystemPrompt(tiendaId) + bloqueRespuestasRapidas(catalogoParaPrompt(rapidas));
+    let variable = '';
+    if (name) variable += `Nombre del cliente: ${name}`;
     if (shopify_context && shopify_context.trim()) {
-      systemPrompt += `\n\n## 🛒 PRODUCTOS DISPONIBLES EN TIENDA (datos reales de Shopify):\n${shopify_context}\n\n⚠️ IMPORTANTE: Estos productos YA FUERON encontrados en Shopify. ÚSALOS DIRECTAMENTE sin llamar la tool buscar_productos. Si el cliente pregunta por uno de estos, confirma precio, tallas y cierra la venta YA.`;
+      variable += `\n\n## PRODUCTOS YA ENCONTRADOS EN SHOPIFY (datos reales):\n${shopify_context}\nÚsalos directamente, sin llamar buscar_productos.`;
     }
+    const systemPrompt = [
+      { type: 'text', text: estable, cache_control: { type: 'ephemeral' } },
+      ...(variable.trim() ? [{ type: 'text', text: variable.trim() }] : []),
+    ];
+    // Sin respuestas rápidas cargadas, esa tool no se ofrece (IND, o Supabase caído).
+    const tools = rapidas.length ? MANDI_TOOLS : MANDI_TOOLS.filter(t => t.name !== 'enviar_respuesta_rapida');
 
     // Mensajes para Claude.
     //
@@ -244,76 +245,53 @@ export default async function handler(req, res) {
       ? [...history]
       : fusionarTurnos([...history, { role: 'user', content: userContent }]);
 
-    // ── PRIMERA LLAMADA A CLAUDE ────────────────────────────────────────────
-    let response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 600,
-      system: systemPrompt,
-      tools: MANDI_TOOLS,
-      messages: apiMessages
+    // ── LLAMADA A CLAUDE + CICLO DE TOOLS ───────────────────────────────────
+    const llamar = (messages) => anthropic.messages.create({
+      model: MODELO, max_tokens: 600, system: systemPrompt, tools, messages,
     });
+    const sumar = (u) => {
+      totalInputTokens += (u?.input_tokens || 0) + (u?.cache_creation_input_tokens || 0) + (u?.cache_read_input_tokens || 0);
+      totalOutputTokens += u?.output_tokens || 0;
+      tokensCache += u?.cache_read_input_tokens || 0;
+    };
+    let totalInputTokens = 0, totalOutputTokens = 0, tokensCache = 0;
 
-    let totalInputTokens = response.usage?.input_tokens || 0;
-    let totalOutputTokens = response.usage?.output_tokens || 0;
+    let response = await llamar(apiMessages);
+    sumar(response.usage);
 
-    // ── AGENTIC LOOP: ejecutar tools si MANDI las pidió ────────────────────
-    // Guardamos los mensajes intermedios para el historial completo
+    // Un turno puede pedir VARIAS tools a la vez (p. ej. dos respuestas rápidas):
+    // cada tool_use necesita su tool_result o la API rechaza la llamada siguiente.
+    // (Antes solo se atendía la primera.)
     const intermediateMessages = [];
-
-    while (response.stop_reason === 'tool_use') {
-      const toolUseBlock = response.content.find(b => b.type === 'tool_use');
-      if (!toolUseBlock) break;
-
-      toolUsada = toolUseBlock.name;
-      keywordShopify = toolUseBlock.input?.keyword || '';
-      clasificacion = 'PRODUCTO';
-
-      console.log(`MANDI tool: ${toolUsada} → "${keywordShopify}"`);
-
-      // Ejecutar la tool
-      const toolResult = await executeTool(toolUseBlock.name, toolUseBlock.input, tiendaId);
-      if (toolResult.productos) {
-        productosEncontrados = toolResult.productos.split(' ||| ').length;
+    const toolsUsadas = [];
+    let vueltas = 0;
+    while (response.stop_reason === 'tool_use' && vueltas < MAX_VUELTAS) {
+      vueltas++;
+      const usos = response.content.filter(b => b.type === 'tool_use');
+      if (!usos.length) break;
+      const resultados = [];
+      for (const uso of usos) {
+        toolsUsadas.push(uso.name);
+        if (uso.name === 'buscar_productos') { keywordShopify = uso.input?.keyword || ''; clasificacion = 'PRODUCTO'; }
+        console.log(`MANDI tool: ${uso.name} →`, JSON.stringify(uso.input || {}));
+        const r = await executeTool(uso.name, uso.input, tiendaId, ctx);
+        if (r.productos) productosEncontrados = r.productos.split(' ||| ').length;
+        if (r.fuente) fuenteProductos = r.fuente;
+        resultados.push({ type: 'tool_result', tool_use_id: uso.id, content: JSON.stringify(r) });
       }
-      if (toolResult.fuente) {
-        fuenteProductos = toolResult.fuente;
-      }
-
-      // Mensaje assistant con el tool_use
-      const assistantToolMsg = { role: 'assistant', content: response.content };
-
-      // Mensaje user con el tool_result
-      const toolResultMessage = {
-        role: 'user',
-        content: [{
-          type: 'tool_result',
-          tool_use_id: toolUseBlock.id,
-          content: JSON.stringify(toolResult)
-        }]
-      };
-
-      // Guardamos estos mensajes para el historial
-      intermediateMessages.push(assistantToolMsg, toolResultMessage);
-
-      // Segunda llamada con el resultado de la tool
-      response = await anthropic.messages.create({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 600,
-        system: systemPrompt,
-        tools: MANDI_TOOLS,
-        messages: [
-          ...apiMessages,
-          ...intermediateMessages
-        ]
-      });
-
-      totalInputTokens += response.usage?.input_tokens || 0;
-      totalOutputTokens += response.usage?.output_tokens || 0;
+      intermediateMessages.push({ role: 'assistant', content: response.content }, { role: 'user', content: resultados });
+      response = await llamar([...apiMessages, ...intermediateMessages]);
+      sumar(response.usage);
     }
+    toolUsada = [...new Set(toolsUsadas)].join(',');
+    if (ctx.enviadas.length && !clasificacion) clasificacion = 'RESPUESTA_RAPIDA';
+    if (ctx.derivar && !clasificacion) clasificacion = 'DERIVAR';
 
     // ── RESPUESTA FINAL ──────────────────────────────────────────────────────
     const replyBlock = response.content.find(b => b.type === 'text');
-    const reply = replyBlock?.text || '';
+    let reply = (replyBlock?.text || '').trim();
+    // "OK" = el agente no tiene nada que agregar a la respuesta rápida que mandó.
+    if (ctx.enviadas.length && /^ok[.!]?$/i.test(reply)) reply = '';
 
     if (!toolUsada) clasificacion = 'OTRO';
 
@@ -353,11 +331,16 @@ export default async function handler(req, res) {
       tienda: tiendaId,
       source: source || 'unknown',
       tool_used: toolUsada,
+      // Ids de respuestas rápidas que el INBOX tiene que enviar (completas), en orden,
+      // ANTES del texto. Y si hay que marcar el chat para una persona.
+      respuestas_rapidas: ctx.enviadas,
+      derivar: ctx.derivar,
+      modelo: MODELO,
       keyword: keywordShopify,
       productos_encontrados: productosEncontrados,
       fuente_productos: fuenteProductos,
       context_turns: Math.floor(apiMessages.length / 2),
-      tokens: { input: totalInputTokens, output: totalOutputTokens },
+      tokens: { input: totalInputTokens, output: totalOutputTokens, cache_leidos: tokensCache },
       elapsed_ms: elapsed
     });
 
