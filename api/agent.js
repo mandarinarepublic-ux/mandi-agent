@@ -186,7 +186,7 @@ export default async function handler(req, res) {
     // nada y se re-saludaba a mitad de conversación.
     // Si Supabase falla devuelve [] y MANDI responde igual, sin memoria ese turno.
     const cuenta = CUENTA_DE[tiendaId] || 'MANDI';
-    const history = reset_session ? [] : await getConversacion(phone, 300, cuenta);
+    const history = reset_session ? [] : await getConversacion(phone, 1000, cuenta);
 
     // Construir contenido del usuario
     const imageUrl = image_url || media_url;
