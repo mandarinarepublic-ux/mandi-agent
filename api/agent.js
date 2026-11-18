@@ -270,8 +270,9 @@ export default async function handler(req, res) {
       totalInputTokens += (u?.input_tokens || 0) + (u?.cache_creation_input_tokens || 0) + (u?.cache_read_input_tokens || 0);
       totalOutputTokens += u?.output_tokens || 0;
       tokensCache += u?.cache_read_input_tokens || 0;
+      tokensCacheEscritos += u?.cache_creation_input_tokens || 0;
     };
-    let totalInputTokens = 0, totalOutputTokens = 0, tokensCache = 0;
+    let totalInputTokens = 0, totalOutputTokens = 0, tokensCache = 0, tokensCacheEscritos = 0;
 
     let response = await llamar(apiMessages);
     sumar(response.usage);
@@ -370,7 +371,9 @@ export default async function handler(req, res) {
       productos_encontrados: productosEncontrados,
       fuente_productos: fuenteProductos,
       context_turns: Math.floor(apiMessages.length / 2),
-      tokens: { input: totalInputTokens, output: totalOutputTokens, cache_leidos: tokensCache },
+      // El inbox guarda esto por chat (inbox.ia_consumo) y calcula el costo:
+      // input es el TOTAL de entrada; cache_leidos/escritos van aparte porque se cobran distinto.
+      tokens: { input: totalInputTokens, output: totalOutputTokens, cache_leidos: tokensCache, cache_escritos: tokensCacheEscritos },
       elapsed_ms: elapsed
     });
 
