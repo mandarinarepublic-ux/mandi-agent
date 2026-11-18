@@ -187,9 +187,13 @@ export default async function handler(req, res) {
     // `Map` en RAM que en serverless llegaba vacío casi siempre: MANDI no recordaba
     // nada y se re-saludaba a mitad de conversación.
     // Si Supabase falla devuelve [] y MANDI responde igual, sin memoria ese turno.
+    // Solo los ÚLTIMOS 50 mensajes (antes 1000). Medido el 17-nov-2026: un chat de
+    // 2.172 mensajes (guías de Servientrega, pruebas) confundió al agente, que
+    // contestó "OK" a "¿qué modelos de Goku tienen?"; y en chats largos leer todo
+    // costaba el doble. Con 50 sabe en qué va la venta.
     const cuenta = CUENTA_DE[tiendaId] || 'MANDI';
     const [history, ficha] = await Promise.all([
-      reset_session ? [] : getConversacion(phone, 1000, cuenta),
+      reset_session ? [] : getConversacion(phone, 50, cuenta),
       getFichaChat(phone, cuenta),
     ]);
 
