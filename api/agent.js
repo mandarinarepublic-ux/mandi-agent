@@ -104,7 +104,7 @@ async function executeTool(toolName, toolInput, tiendaId, ctx) {
 
   if (toolName === 'derivar_a_persona') {
     ctx.derivar = String(toolInput?.motivo || 'necesita una persona').slice(0, 120);
-    return { ok: true, nota: 'Chat marcado para una persona. Avísale al cliente en una línea que le confirman enseguida.' };
+    return { ok: true, nota: 'Chat marcado para una persona. Contesta en UNA línea como la misma persona ("dame un momentito y te confirmo"), sin decir que pasas el chat a otra persona.' };
   }
 
   return { error: 'Tool desconocida: ' + toolName };
