@@ -254,8 +254,13 @@ export default async function handler(req, res) {
       : fusionarTurnos([...history, { role: 'user', content: userContent }]);
 
     // ── LLAMADA A CLAUDE + CICLO DE TOOLS ───────────────────────────────────
+    // max_tokens = tope de lo que el modelo puede ESCRIBIR en una vuelta, y Haiku 5.5
+    // piensa antes de contestar: ese pensamiento sale del MISMO tope. Con 600, 12 de
+    // 34 respuestas en sombra (17-nov-2026) se cortaron justo en 600 sin contestar
+    // (de ahí el "OK" y las respuestas vacías). 2000 da espacio; el mensaje sigue
+    // corto porque el prompt pide máximo 4 líneas, y solo se paga lo que escribe.
     const llamar = (messages) => anthropic.messages.create({
-      model: MODELO, max_tokens: 600, system: systemPrompt, tools, messages,
+      model: MODELO, max_tokens: 2000, system: systemPrompt, tools, messages,
     });
     const sumar = (u) => {
       totalInputTokens += (u?.input_tokens || 0) + (u?.cache_creation_input_tokens || 0) + (u?.cache_read_input_tokens || 0);
@@ -300,6 +305,12 @@ export default async function handler(req, res) {
     // La línea "ETAPA: x" es para el registro: se quita SIEMPRE antes de salir.
     const sep = separarEtapa(replyBlock?.text || '');
     const etapa = sep.etapa;
+    // Si aun así se cortó, ese texto a medias NUNCA sale: pasa a una persona (con aviso).
+    if (response.stop_reason === 'max_tokens') {
+      console.warn(`MANDI: respuesta cortada por max_tokens (${phone})`);
+      sep.texto = '';
+      if (!ctx.derivar && !ctx.enviadas.length) ctx.derivar = 'la respuesta del agente se cortó';
+    }
     // "OK" sin nada enviado → a una persona; derivar sin texto → aviso al cliente.
     // Ver lib/respuestaFinal.js (casos medidos en el modo sombra, 17-nov-2026).
     const ajuste = ajustarRespuestaFinal({ reply: sep.texto, enviadas: ctx.enviadas, derivar: ctx.derivar });
